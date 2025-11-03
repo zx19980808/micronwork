@@ -7,13 +7,11 @@ from tkinter import filedialog, messagebox
 ##python 檔案名稱 --file 檔案路徑 --sheet 工作表名稱 --name 篩選人名 --out 輸出檔名
 def find_header_row(df):
     # 找出包含 "Date" 或 "日期" 的列位置（優先偵測英文字 "Date"）
-    for i in range(min(10, len(df))):
+    indices = []
+    for i in range(len(df)):
         row = df.iloc[i].astype(str).str.lower().fillna('')
-        if any('date' in c for c in row):
-            return i
-        if any('日期' in c for c in row):
-            return i
-    return None
+        if any('date' in c for c in row) or any('日期' in c for c in row): indices.append(i)
+    return indices if indices else None
 
 def build_column_labels(df, header1_idx, header2_idx):
     ncols = df.shape[1]
@@ -48,91 +46,99 @@ def find_col_by_candidates(labels, candidates):
     return None
 
 def convert_to_gcal(df_raw, sheet_name=None, name_filter=None, out_csv='google_calendar.csv'):
-    header1 = find_header_row(df_raw)
-    if header1 is None:
+    header_positions = find_header_row(df_raw)
+    if not header_positions:
         raise RuntimeError("無法找到標題列（找不到 'Date' / '日期'）。請檢查 Excel 格式。")
-    header2 = header1 + 1
-    col_labels, is_date = build_column_labels(df_raw, header1, header2)
-    data = df_raw.iloc[header2+1:].copy()
-    data.columns = col_labels
+    
+    all_events = []
+    # 針對每個找到的日期標題區段進行處理
+    for i,header1 in enumerate(header_positions):
+        # 計算本區段的結束位置
+        next_header = header_positions[i + 1] if i + 1 < len(header_positions) else len(df_raw)
+        header2 = header1 + 1
 
-    # 找 member 與 course 欄
-    member_col = find_col_by_candidates(col_labels, ['member','姓名','成員','名字','name'])
-    course_col = find_col_by_candidates(col_labels, ['課別','course','科別'])
-    if member_col is None:
-        # 嘗試推定為第二欄或第一個非日期欄
-        non_date = [col_labels[i] for i,v in enumerate(is_date) if not v]
-        if not non_date:
-            raise RuntimeError("無法找到成員欄位。")
-        member_col = non_date[1] if len(non_date) > 1 else non_date[0]
-    if course_col is None:
-        non_date = [col_labels[i] for i,v in enumerate(is_date) if not v]
-        try:
-            idx = non_date.index(member_col)
-            course_col = non_date[idx+1] if idx+1 < len(non_date) else None
-        except ValueError:
-            course_col = non_date[1] if len(non_date) > 1 else None
+        # 建立此區段的欄位標籤
+        col_labels, is_date = build_column_labels(df_raw, header1, header2)
 
-    # 取得日期欄位名稱列表
-    date_cols = [col_labels[i] for i,v in enumerate(is_date) if v]
+        # 只取這個區段的資料
+        data = df_raw.iloc[header2+1:next_header].copy()
+        data.columns = col_labels
 
-    events = []
-    for _, row in data.iterrows():
-        member = row.get(member_col, '')
-        course = row.get(course_col, '')
-        if pd.isna(member) or str(member).strip() == '':
-            continue
-        if name_filter and name_filter.strip() not in str(member):
-            continue
-        for dcol in date_cols:
-            val = row.get(dcol, '')
-            if pd.isna(val) or str(val).strip() == '':
-                continue
-            val_s = str(val).strip()
-            if '休' in val_s:
-                continue
-            first = val_s[0].upper() if val_s else ''
-            # 解析日期
+        # 找出此區段的成員欄和課程欄
+        member_col = find_col_by_candidates(col_labels, ['member','姓名','成員','名字','name'])
+        course_col = find_col_by_candidates(col_labels, ['課別','course','科別'])
+        if member_col is None:
+            # 嘗試推定為第二欄或第一個非日期欄
+            non_date = [col_labels[i] for i,v in enumerate(is_date) if not v]
+            if not non_date:
+                raise RuntimeError("無法找到成員欄位。")
+            member_col = non_date[1] if len(non_date) > 1 else non_date[0]
+        if course_col is None:
+            non_date = [col_labels[i] for i,v in enumerate(is_date) if not v]
             try:
-                start_dt = pd.to_datetime(dcol)
-            except Exception:
-                start_dt = pd.to_datetime(str(dcol))
-            start_date = start_dt.date()
-            # 預設為全天事件
-            start_time = ''
-            end_time = ''
-            end_date = start_date
-            all_day = 'TRUE'
-            description = val_s
-            # 如果開頭是 D 或 N，填入時間並把 All Day 設為 FALSE
-            if first == 'D':
-                start_time = '07:30'
-                end_time = '19:30'
-                all_day = 'FALSE'
-                description = val_s+' '+'07:30~19:30'
-            elif first == 'N':
-                start_time = '19:30'
-                end_time = '07:30'
-                all_day = 'FALSE'
-                description = val_s+' '+'19:30~07:30'
-                end_date = (pd.to_datetime(start_date) + pd.Timedelta(days=1)).date()
-            # 建事件
-            events.append({
-                'Subject': f"{str(member).strip()} - {str(course).strip()}",
-                'Start Date': start_date.strftime('%Y-%m-%d'),
-                'Start Time': start_time,
-                'End Date': end_date.strftime('%Y-%m-%d'),
-                'End Time': end_time,
-                'All Day Event': all_day,
-                'Description': description,
-                'Location': '',
-                'Private': 'TRUE'
-            })
+                idx = non_date.index(member_col)
+                course_col = non_date[idx+1] if idx+1 < len(non_date) else None
+            except ValueError:
+                course_col = non_date[1] if len(non_date) > 1 else None
 
-    if not events:
+        # 取得日期欄位名稱列表
+        date_cols = [col_labels[i] for i,v in enumerate(is_date) if v]
+        for _, row in data.iterrows():
+            member = row.get(member_col, '')
+            course = row.get(course_col, '')
+            if pd.isna(member) or str(member).strip() == '':
+                continue
+            if name_filter and name_filter.strip() not in str(member):
+                continue
+            for dcol in date_cols:
+                val = row.get(dcol, '')
+                if pd.isna(val) or str(val).strip() == '':
+                    continue
+                val_s = str(val).strip()
+                if '休' in val_s:
+                    continue
+                first = val_s[0].upper() if val_s else ''
+                # 解析日期
+                try:
+                    start_dt = pd.to_datetime(dcol)
+                except Exception:
+                    start_dt = pd.to_datetime(str(dcol))
+                start_date = start_dt.date()
+                # 預設為全天事件
+                start_time = ''
+                end_time = ''
+                end_date = start_date
+                all_day = 'TRUE'
+                description = val_s
+                # 如果開頭是 D 或 N，填入時間並把 All Day 設為 FALSE
+                if first == 'D':
+                    start_time = '07:30'
+                    end_time = '19:30'
+                    all_day = 'FALSE'
+                    description = val_s+' '+'07:30~19:30'
+                elif first == 'N':
+                    start_time = '19:30'
+                    end_time = '07:30'
+                    all_day = 'FALSE'
+                    description = val_s+' '+'19:30~07:30'
+                    end_date = (pd.to_datetime(start_date) + pd.Timedelta(days=1)).date()
+                # 建事件
+                all_events.append({
+                    'Subject': f"{str(member).strip()} - {str(course).strip()}",
+                    'Start Date': start_date.strftime('%Y-%m-%d'),
+                    'Start Time': start_time,
+                    'End Date': end_date.strftime('%Y-%m-%d'),
+                    'End Time': end_time,
+                    'All Day Event': all_day,
+                    'Description': description,
+                    'Location': '',
+                    'Private': 'TRUE'
+                })
+
+    if not all_events:
         return 0
 
-    out_df = pd.DataFrame(events, columns=[
+    out_df = pd.DataFrame(all_events, columns=[
         'Subject','Start Date','Start Time','End Date','End Time',
         'All Day Event','Description','Location','Private'
     ])
